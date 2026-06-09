@@ -110,9 +110,21 @@ ensure_runtime_state() {
 }
 
 build_all() {
-  cargo build --manifest-path "$ROOT_DIR/optimizer/rust/Cargo.toml"
-  cargo build --manifest-path "$ROOT_DIR/ainfra-compiler/Cargo.toml"
-  make -C "$ROOT_DIR/infravm"
+  if [ -f "$ROOT_DIR/optimizer/rust/Cargo.toml" ]; then
+    cargo build --manifest-path "$ROOT_DIR/optimizer/rust/Cargo.toml"
+  else
+    echo "optimizer missing: skipping optimizer build"
+  fi
+  if [ -f "$ROOT_DIR/ainfra-compiler/Cargo.toml" ]; then
+    cargo build --manifest-path "$ROOT_DIR/ainfra-compiler/Cargo.toml"
+  else
+    echo "ainfra-compiler missing: skipping compiler build"
+  fi
+  if [ -f "$ROOT_DIR/infravm/Makefile" ]; then
+    make -C "$ROOT_DIR/infravm"
+  else
+    echo "infravm missing: skipping VM build"
+  fi
   if have npm; then
     (cd "$ROOT_DIR/infraos-ui" && npm install && npm run build)
   else
@@ -121,12 +133,20 @@ build_all() {
 }
 
 compile_aif() {
+  if [ ! -x "$ROOT_DIR/ainfra-compiler/target/debug/ainfra-compiler" ]; then
+    echo "ainfra-compiler binary missing. Run this from AInfra, or build/install the compiler first."
+    exit 1
+  fi
   src="${1:-$ROOT_DIR/examples/local-stub.ainfra}"
   out="${2:-$ROOT_DIR/data/objects/local-stub.aif}"
   "$ROOT_DIR/ainfra-compiler/target/debug/ainfra-compiler" "$src" -o "$out"
 }
 
 run_aif() {
+  if [ ! -x "$ROOT_DIR/infravm/infravm" ]; then
+    echo "infravm binary missing. Run this from AInfra/InfraVM, or build/install InfraVM first."
+    exit 1
+  fi
   aif="${1:-$ROOT_DIR/data/objects/local-stub.aif}"
   if [ "${2:-}" ]; then
     "$ROOT_DIR/infravm/infravm" "$aif" "$2"
