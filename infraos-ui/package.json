@@ -1,0 +1,16 @@
+{
+  "name": "infraos-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vite": "^6.0.5",
+    "typescript": "^5.7.2"
+  },
+  "devDependencies": {}
+}
