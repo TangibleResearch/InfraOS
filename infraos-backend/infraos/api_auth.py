@@ -83,7 +83,7 @@ def requests(user: dict = Depends(auth.require_user)):
 @router.post("/requests/{request_id}/resolve")
 def resolve_request(request_id: int, request: ResolvePrivilegeRequest, user: dict = Depends(auth.require_user)):
     auth.require_admin(user)
-    return auth.resolve_request(request_id, request.approve)
+    return auth.resolve_request(request_id, request.approve, user)
 
 
 @router.get("/notifications")

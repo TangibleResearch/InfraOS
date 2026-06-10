@@ -226,16 +226,20 @@ def list_requests(include_all: bool = True, user_id: int | None = None) -> list[
         if include_all:
             rows = conn.execute(
                 """
-                select privilege_requests.*, users.username from privilege_requests
+                select privilege_requests.*, users.username, resolver.username as resolver_username
+                from privilege_requests
                 join users on users.id = privilege_requests.user_id
+                left join users as resolver on resolver.id = privilege_requests.resolved_by
                 order by privilege_requests.created_at desc
                 """
             ).fetchall()
         else:
             rows = conn.execute(
                 """
-                select privilege_requests.*, users.username from privilege_requests
+                select privilege_requests.*, users.username, resolver.username as resolver_username
+                from privilege_requests
                 join users on users.id = privilege_requests.user_id
+                left join users as resolver on resolver.id = privilege_requests.resolved_by
                 where user_id = ?
                 order by privilege_requests.created_at desc
                 """,
@@ -244,7 +248,7 @@ def list_requests(include_all: bool = True, user_id: int | None = None) -> list[
         return [dict(row) for row in rows]
 
 
-def resolve_request(request_id: int, approve: bool) -> dict:
+def resolve_request(request_id: int, approve: bool, resolver: dict) -> dict:
     with db.connect() as conn:
         row = conn.execute(
             """
@@ -260,18 +264,18 @@ def resolve_request(request_id: int, approve: bool) -> dict:
             raise HTTPException(status_code=400, detail="request already resolved")
         status = "granted" if approve else "denied"
         conn.execute(
-            "update privilege_requests set status = ?, resolved_at = ? where id = ?",
-            (status, time.time(), request_id),
+            "update privilege_requests set status = ?, resolved_at = ?, resolved_by = ? where id = ?",
+            (status, time.time(), resolver["id"], request_id),
         )
         if approve:
             conn.execute(
                 "insert or ignore into user_privileges(user_id, privilege) values (?, ?)",
                 (row["user_id"], row["privilege"]),
             )
-            add_notification(conn, row["user_id"], "privilege_granted", f"Admin granted privilege {row['privilege']}")
+            add_notification(conn, row["user_id"], "privilege_granted", f"{resolver['username']} granted privilege {row['privilege']}")
         else:
-            add_notification(conn, row["user_id"], "privilege_denied", f"Admin denied privilege {row['privilege']}")
-        return {"id": request_id, "status": status}
+            add_notification(conn, row["user_id"], "privilege_denied", f"{resolver['username']} denied privilege {row['privilege']}")
+        return {"id": request_id, "status": status, "resolved_by": resolver["id"], "resolver_username": resolver["username"]}
 
 
 def list_notifications(user_id: int) -> list[dict]:

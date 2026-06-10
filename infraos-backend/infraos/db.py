@@ -75,6 +75,9 @@ def init_db() -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("pragma table_info(privilege_requests)").fetchall()}
+        if "resolved_by" not in columns:
+            conn.execute("alter table privilege_requests add column resolved_by integer")
         conn.execute(
             """
             create table if not exists notifications (

@@ -48,6 +48,8 @@ export type PrivilegeRequest = {
   status: "pending" | "granted" | "denied";
   created_at: number;
   resolved_at?: number | null;
+  resolved_by?: number | null;
+  resolver_username?: string | null;
 };
 
 export type AuthNotification = {

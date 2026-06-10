@@ -220,6 +220,24 @@ main {
   gap: 6px;
 }
 
+.notification-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.notification-button span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #0e7490;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 900;
+}
+
 .health-chip,
 .user-chip,
 .pill,
@@ -358,10 +376,15 @@ main {
 .split,
 .auth-grid,
 .ide-grid,
-.ide-bottom-grid {
+.ide-bottom-grid,
+.graph-page-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 400px;
   gap: 14px;
+}
+
+.graph-page-grid {
+  grid-template-columns: 1fr;
 }
 
 .auth-grid {
@@ -376,6 +399,13 @@ main {
 .ide-bottom-grid {
   grid-template-columns: minmax(360px, 0.45fr) minmax(0, 1fr);
   margin-top: 14px;
+}
+
+.dragpoints-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
 }
 
 .panel {
@@ -735,6 +765,52 @@ textarea {
   font-size: 13px;
 }
 
+.request-line span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.notifications-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.75fr);
+  gap: 14px;
+}
+
+.notification-list {
+  display: grid;
+  gap: 8px;
+}
+
+.notification-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid #d7dee8;
+  border-left: 4px solid #bac7d5;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.notification-card.unread,
+.notification-card.pending {
+  border-left-color: #14b8a6;
+  background: #f8fcff;
+}
+
+.notification-card strong {
+  display: block;
+  color: #111827;
+  font-size: 13px;
+}
+
+.notification-card p {
+  margin: 4px 0 0;
+  color: #667085;
+  font-size: 12px;
+}
+
 .toast-stack {
   position: fixed;
   right: 18px;
@@ -761,6 +837,326 @@ textarea {
   background: #f8fcff;
 }
 
+.drag-palette {
+  align-self: stretch;
+}
+
+.drag-block-palette {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  border-color: #bac7d5;
+  background: #ffffff;
+  color: #172033;
+  text-align: left;
+}
+
+.drag-block-palette:hover {
+  border-color: #0e7490;
+  background: #edf7fb;
+}
+
+.drag-block-palette strong,
+.drag-block-palette span {
+  display: block;
+}
+
+.drag-block-palette span {
+  margin-top: 2px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.wire-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.prompt-editor-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #e6ebf1;
+}
+
+.prompt-editor-list label {
+  display: grid;
+  gap: 6px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.drag-prompt-input {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.drag-canvas {
+  position: relative;
+  overflow: auto;
+  height: 460px;
+  border: 1px solid #cfd8e3;
+  border-radius: 4px;
+  background:
+    linear-gradient(#eef5f9 1px, transparent 1px),
+    linear-gradient(90deg, #eef5f9 1px, transparent 1px),
+    #fbfdff;
+  background-size: 24px 24px;
+}
+
+.drag-canvas::before {
+  content: "";
+  display: block;
+  width: 900px;
+  height: 460px;
+}
+
+.drag-wire-layer {
+  position: absolute;
+  inset: 0;
+  width: 900px;
+  height: 460px;
+  pointer-events: none;
+}
+
+.drag-wire-layer path {
+  fill: none;
+  stroke: #0b7285;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+  marker-end: url(#drag-arrow);
+}
+
+.drag-wire-layer marker path {
+  fill: #0b7285;
+}
+
+.drag-wire-layer text {
+  fill: #075985;
+  font-size: 11px;
+  font-weight: 800;
+  paint-order: stroke;
+  stroke: #fbfdff;
+  stroke-width: 5px;
+}
+
+.drag-point-block {
+  position: absolute;
+  z-index: 2;
+  width: 150px;
+  min-height: 68px;
+  padding: 10px 34px 10px 12px;
+  border: 2px solid #0e7490;
+  border-left-width: 5px;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(16, 24, 40, 0.12);
+  cursor: grab;
+}
+
+.drag-point-block:active {
+  cursor: grabbing;
+}
+
+.drag-point-block span {
+  display: block;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.drag-point-block strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #111827;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drag-point-block.model {
+  border-color: #0e7490;
+}
+
+.drag-point-block.prompt {
+  border-color: #2563eb;
+}
+
+.drag-point-block.agent {
+  border-color: #14b8a6;
+}
+
+.drag-point-block.run {
+  border-color: #0f766e;
+}
+
+.drag-point-block.port {
+  border-color: #0369a1;
+}
+
+.block-remove {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-color: #cfd8e3;
+  background: #ffffff;
+  color: #526173;
+  line-height: 1;
+}
+
+.block-remove:hover {
+  border-color: #b4233c;
+  background: #fff1f3;
+  color: #b4233c;
+}
+
+.drag-source-panel pre {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.drag-source-panel {
+  grid-column: 1 / -1;
+}
+
+.graph-canvas {
+  position: relative;
+  overflow: auto;
+  width: 100%;
+  height: 560px;
+  border: 1px solid #d7dee8;
+  border-radius: 4px;
+  background:
+    linear-gradient(#eef5f9 1px, transparent 1px),
+    linear-gradient(90deg, #eef5f9 1px, transparent 1px),
+    #fbfdff;
+  background-size: 28px 28px;
+}
+
+.graph-canvas::before {
+  content: "";
+  display: block;
+  width: var(--graph-width);
+  height: var(--graph-height);
+}
+
+.graph-wire-layer {
+  position: absolute;
+  inset: 0;
+  width: var(--graph-width);
+  height: var(--graph-height);
+  pointer-events: none;
+}
+
+.graph-object-block {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  gap: 2px;
+  width: 198px;
+  min-height: 72px;
+  padding: 10px 38px 10px 12px;
+  border: 2px solid #0e7490;
+  border-left-width: 5px;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #172033;
+  text-align: left;
+  box-shadow: 0 8px 18px rgba(16, 24, 40, 0.12);
+  cursor: grab;
+}
+
+.graph-object-block:hover {
+  border-color: #14b8a6;
+  background: #f8fcff;
+}
+
+.graph-object-block:active {
+  cursor: grabbing;
+}
+
+.graph-object-block span {
+  overflow: hidden;
+  color: #667085;
+  font-size: 10px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.graph-object-block strong,
+.graph-object-block small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-object-block strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.graph-object-block small {
+  color: #475467;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.graph-object-block.model {
+  border-color: #0e7490;
+}
+
+.graph-object-block.prompt {
+  border-color: #2563eb;
+}
+
+.graph-object-block.agent {
+  border-color: #14b8a6;
+}
+
+.graph-object-block.run {
+  border-color: #0f766e;
+}
+
+.graph-object-block.port {
+  border-color: #0369a1;
+}
+
+.graph-object-block.start {
+  background: #ccfbf1;
+}
+
+.graph-object-block.visited {
+  border-color: #dc2626;
+}
+
+.graph-object-block .vm-marker {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #991b1b;
+  border-radius: 3px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 900;
+}
+
 .graph {
   width: 100%;
   min-height: 560px;
@@ -769,15 +1165,33 @@ textarea {
   border-radius: 4px;
 }
 
-.edges line {
+.edges path {
+  fill: none;
   stroke: #0e7490;
   stroke-width: 2;
+  marker-end: url(#graph-arrow);
+}
+
+.edges path.hot {
+  stroke: #dc2626;
+  stroke-width: 3;
+}
+
+.edges marker path {
+  fill: #0e7490;
+}
+
+.graph-wire-layer marker path {
+  fill: #0e7490;
 }
 
 .edges text {
   fill: #075985;
   font-size: 12px;
   font-weight: 800;
+  paint-order: stroke;
+  stroke: #fbfdff;
+  stroke-width: 4px;
 }
 
 .node rect {
@@ -791,10 +1205,26 @@ textarea {
   stroke: #115e59;
 }
 
+.node.visited rect {
+  stroke: #dc2626;
+}
+
 .node text {
   fill: #172033;
   font-size: 13px;
   font-weight: 800;
+}
+
+.node .vm-marker {
+  fill: #dc2626;
+  stroke: #991b1b;
+  stroke-width: 1;
+}
+
+.node .vm-marker-text {
+  fill: #ffffff;
+  font-size: 8px;
+  font-weight: 900;
 }
 
 @media (max-width: 1050px) {
@@ -806,7 +1236,9 @@ textarea {
   .split,
   .auth-grid,
   .ide-grid,
-  .ide-bottom-grid {
+  .ide-bottom-grid,
+  .dragpoints-grid,
+  .notifications-grid {
     grid-template-columns: 1fr;
   }
 }

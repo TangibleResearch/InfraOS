@@ -34,6 +34,29 @@ type Toast = {
   action?: "auth";
 };
 
+type DragPointKind = "model" | "prompt" | "agent" | "run" | "port";
+
+type DragPointBlock = {
+  id: string;
+  kind: DragPointKind;
+  name: string;
+  x: number;
+  y: number;
+  promptText?: string;
+};
+
+type DragPointWire = {
+  id: string;
+  from: string;
+  to: string;
+  label: string;
+};
+
+type CanvasPoint = {
+  x: number;
+  y: number;
+};
+
 type State = {
   page: string;
   health: Health | null;
@@ -51,6 +74,11 @@ type State = {
   formValues: Record<string, string | boolean>;
   assistantMessages: string[];
   ideOutputPath: string | null;
+  dragPointBlocks: DragPointBlock[];
+  dragPointWires: DragPointWire[];
+  lastRunObjectId: string | null;
+  lastRunTrace: string[];
+  graphNodePositions: Record<string, CanvasPoint>;
 };
 
 const EDITABLE_SELECTOR = "input, textarea, select";
@@ -73,7 +101,21 @@ const state: State = {
   assistantMessages: [
     "I can help debug compile errors, failed VM runs, missing provider keys, and AInfra object wiring. Compile or run something, then ask me what went wrong."
   ],
-  ideOutputPath: null
+  ideOutputPath: null,
+  dragPointBlocks: [
+    { id: "dp-model-local", kind: "model", name: "local", x: 20, y: 44 },
+    { id: "dp-prompt-answer", kind: "prompt", name: "answer", x: 20, y: 170, promptText: "Answer clearly and briefly: {input}" },
+    { id: "dp-agent-helper", kind: "agent", name: "helper", x: 230, y: 106 },
+    { id: "dp-run-main", kind: "run", name: "main", x: 450, y: 106 }
+  ],
+  dragPointWires: [
+    { id: "wire-agent-model", from: "dp-agent-helper", to: "dp-model-local", label: "model" },
+    { id: "wire-agent-prompt", from: "dp-agent-helper", to: "dp-prompt-answer", label: "prompt" },
+    { id: "wire-run-agent", from: "dp-run-main", to: "dp-agent-helper", label: "runs" }
+  ],
+  lastRunObjectId: null,
+  lastRunTrace: [],
+  graphNodePositions: {}
 };
 
 const defaultSource = `import ai.local.ollama
@@ -188,7 +230,7 @@ function clearFormValues(ids: string[]) {
 }
 
 function pages() {
-  return ["Dashboard", "Objects", "Graph", "IDE", "VM", "Peers", "Auth", "Settings"];
+  return ["Dashboard", "Objects", "Graph", "IDE", "Drag Points", "VM", "Peers", "Auth", "Notifications", "Settings"];
 }
 
 function pageMeta(page: string) {
@@ -197,9 +239,11 @@ function pageMeta(page: string) {
     Objects: { icon: "OB", group: "Resources" },
     Graph: { icon: "GR", group: "Resources" },
     IDE: { icon: "ID", group: "Runtime" },
+    "Drag Points": { icon: "DP", group: "Runtime" },
     VM: { icon: "VM", group: "Runtime" },
     Peers: { icon: "NW", group: "Runtime" },
     Auth: { icon: "AU", group: "Access" },
+    Notifications: { icon: "NT", group: "Access" },
     Settings: { icon: "ST", group: "Access" }
   };
   return meta[page] ?? { icon: "VM", group: "Overview" };
@@ -234,10 +278,22 @@ async function refreshNotifications(showToasts = false) {
   const notifications = await getNotifications();
   const oldIds = new Set(state.notifications.map((notification) => notification.id));
   state.notifications = notifications;
-  const fresh = notifications.filter((notification) => !notification.seen && (showToasts || !oldIds.has(notification.id)));
+  const fresh = notifications.filter((notification) => !notification.seen && shouldToastNotification(notification) && (showToasts || !oldIds.has(notification.id)));
   for (const notification of fresh.reverse()) {
     toast(notification.message, notification.kind === "privilege_request" ? "auth" : undefined);
   }
+}
+
+function shouldToastNotification(notification: AuthNotification) {
+  if (notification.kind !== "privilege_request") return true;
+  const match = notification.message.match(/^(.+) wants to have privilege (.+)$/);
+  if (!match) return true;
+  const [, username, privilege] = match;
+  return state.privilegeRequests.some((request) =>
+    request.username === username &&
+    request.privilege === privilege &&
+    request.status === "pending"
+  );
 }
 
 async function refresh() {
@@ -326,6 +382,7 @@ function nav() {
 function topbar() {
   const providers = state.health?.providers ? Object.entries(state.health.providers as Record<string, boolean>) : [];
   const ready = providers.filter(([, ok]) => ok).length;
+  const unread = state.notifications.filter((notification) => !notification.seen).length;
   return `
     <header class="topbar">
       <div class="crumbs">
@@ -337,6 +394,7 @@ function topbar() {
         <div class="provider-strip">
           <span class="health-chip">${ready}/${providers.length} providers ready</span>
         </div>
+        <button class="ghost notification-button" data-page="Notifications">Notifications${unread ? ` <span>${unread}</span>` : ""}</button>
         <div class="user-chip">${esc(state.user?.username ?? "user")}</div>
         <button id="logout" class="ghost">Sign Out</button>
       </div>
@@ -434,36 +492,256 @@ function objectsPage() {
     </div>`;
 }
 
-function graphPage() {
-  const nodes = state.objects.map((object, index) => {
-    const x = 80 + (index % 3) * 250;
-    const y = 70 + Math.floor(index / 3) * 145;
-    return { object, x, y };
+function objectRank(object: AIFObject) {
+  const ranks: Record<string, number> = {
+    import: 0,
+    var: 0,
+    model: 1,
+    prompt: 1,
+    port: 2,
+    agent: 2,
+    run: 3
+  };
+  return ranks[object.type] ?? 1;
+}
+
+function objectGraphNodes() {
+  const buckets = new Map<number, AIFObject[]>();
+  state.objects.forEach((object) => {
+    const rank = objectRank(object);
+    buckets.set(rank, [...(buckets.get(rank) ?? []), object]);
   });
+  const nodes: { object: AIFObject; x: number; y: number }[] = [];
+  Array.from(buckets.entries()).sort(([a], [b]) => a - b).forEach(([rank, objects]) => {
+    objects
+      .sort((a, b) => a.object_id.localeCompare(b.object_id))
+      .forEach((object, index) => {
+        const saved = state.graphNodePositions[object.object_id];
+        nodes.push({ object, x: saved?.x ?? 42 + rank * 200, y: saved?.y ?? 52 + index * 108 });
+      });
+  });
+  return nodes;
+}
+
+function runTraceFromOutput(output: string) {
+  const trace = Array.from(output.matchAll(/PointRun start:\s+([^\s]+)\s+\(/g)).map((match) => match[1]);
+  return trace.filter((id, index) => trace.indexOf(id) === index);
+}
+
+function dragPointBlockTitle(kind: DragPointKind) {
+  const titles: Record<DragPointKind, string> = {
+    model: "Model",
+    prompt: "Prompt",
+    agent: "Agent",
+    run: "Run",
+    port: "Port"
+  };
+  return titles[kind];
+}
+
+function dragPointDefaults(kind: DragPointKind) {
+  const count = state.dragPointBlocks.filter((block) => block.kind === kind).length + 1;
+  const baseName: Record<DragPointKind, string> = {
+    model: count === 1 ? "local" : `model${count}`,
+    prompt: count === 1 ? "answer" : `prompt${count}`,
+    agent: count === 1 ? "helper" : `agent${count}`,
+    run: count === 1 ? "main" : `run${count}`,
+    port: count === 1 ? "api" : `port${count}`
+  };
+  return baseName[kind];
+}
+
+function connectorPath(from: CanvasPoint, to: CanvasPoint, width = 150, height = 68, fromOffsetY = 0, toOffsetY = 0) {
+  const fromCenter = { x: from.x + width / 2, y: from.y + height / 2 };
+  const toCenter = { x: to.x + width / 2, y: to.y + height / 2 };
+  const leftToRight = toCenter.x >= fromCenter.x;
+  const start = {
+    x: leftToRight ? from.x + width : from.x,
+    y: fromCenter.y + fromOffsetY
+  };
+  const end = {
+    x: leftToRight ? to.x : to.x + width,
+    y: toCenter.y + toOffsetY
+  };
+  const distance = Math.max(80, Math.abs(end.x - start.x) * 0.45);
+  const c1 = { x: start.x + (leftToRight ? distance : -distance), y: start.y };
+  const c2 = { x: end.x - (leftToRight ? distance : -distance), y: end.y };
+  return {
+    d: `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`,
+    labelX: (start.x + end.x) / 2,
+    labelY: (start.y + end.y) / 2 - 8
+  };
+}
+
+function dragPointWirePath(wire: DragPointWire, from: DragPointBlock, to: DragPointBlock) {
+  const targetOffsets: Record<string, number> = {
+    model: -13,
+    prompt: 13,
+    runs: 0
+  };
+  const visualSource = to;
+  const visualTarget = from;
+  return connectorPath(visualSource, visualTarget, 150, 68, 0, targetOffsets[wire.label] ?? 0);
+}
+
+function sourceString(value: string) {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n")}"`;
+}
+
+function dragPointSource() {
+  const blocks = state.dragPointBlocks;
+  const wires = state.dragPointWires;
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  const byKind = (kind: DragPointKind) => blocks.filter((block) => block.kind === kind);
+  const wireTargets = (block: DragPointBlock, label: string) =>
+    wires
+      .filter((wire) => wire.from === block.id && wire.label === label)
+      .map((wire) => byId.get(wire.to))
+      .filter((target): target is DragPointBlock => Boolean(target));
+  const lines: string[] = ["import ai.local.ollama", ""];
+
+  for (const block of byKind("model")) {
+    lines.push(`model ${block.name} {`, `    engine = "ollama"`, `    name = "llama3.2"`, `}`, "");
+  }
+  for (const block of byKind("prompt")) {
+    lines.push(`prompt ${block.name} {`, `    text = ${sourceString(block.promptText || "Answer clearly and briefly: {input}")}`, `}`, "");
+  }
+  for (const block of byKind("agent")) {
+    const model = wireTargets(block, "model")[0] ?? byKind("model")[0];
+    const prompt = wireTargets(block, "prompt")[0] ?? byKind("prompt")[0];
+    lines.push(`agent ${block.name} {`);
+    if (model) lines.push(`    model = ${model.name}`);
+    if (prompt) lines.push(`    prompt = ${prompt.name}`);
+    lines.push(`}`, "");
+  }
+  for (const block of byKind("port")) {
+    const target = wireTargets(block, "runs")[0] ?? byKind("agent")[0];
+    lines.push(`port ${block.name} {`, `    protocol = "http"`, `    host = "127.0.0.1"`, `    port = 8080`);
+    if (target) lines.push("", "    on_request {", `        return ${target.name}`, "    }");
+    lines.push(`}`, "");
+  }
+  const runBlocks = byKind("run");
+  runBlocks.forEach((block, index) => {
+    const target = wireTargets(block, "runs")[0] ?? byKind("agent")[0] ?? byKind("port")[0];
+    if (index === 0) lines.push("// $start$");
+    if (target) {
+      lines.push(`run ${target.kind} ${target.name} on "What is PointRun?"`, "");
+    } else {
+      lines.push(`run agent helper on "What is PointRun?"`, "");
+    }
+  });
+
+  return lines.join("\n").trimEnd();
+}
+
+function dragPointsPage() {
+  const blockOptions = state.dragPointBlocks.map((block) => `<option value="${esc(block.id)}">${esc(block.name)} (${esc(block.kind)})</option>`).join("");
+  const promptBlocks = state.dragPointBlocks.filter((block) => block.kind === "prompt");
+  const source = dragPointSource();
+  const wires = state.dragPointWires.map((wire) => {
+    const from = state.dragPointBlocks.find((block) => block.id === wire.from);
+    const to = state.dragPointBlocks.find((block) => block.id === wire.to);
+    if (!from || !to) return "";
+    const path = dragPointWirePath(wire, from, to);
+    return `<path d="${path.d}" />
+            <text x="${path.labelX}" y="${path.labelY}">${esc(wire.label)}</text>`;
+  }).join("");
+  return `
+    ${pageHeader("Drag Points", "Build AInfra by placing blocks and connecting object pointers.", `<button id="drag-generate-source">Send To IDE</button><button id="drag-compile">Compile Graph</button>`)}
+    <div class="dragpoints-grid">
+      <section class="panel drag-palette">
+        <div class="panel-head"><h2>Blocks</h2><span class="helper-text">drag into canvas</span></div>
+        ${(["model", "prompt", "agent", "run", "port"] as DragPointKind[]).map((kind) => `
+          <button class="drag-block-palette" draggable="true" data-drag-kind="${kind}">
+            <strong>${esc(dragPointBlockTitle(kind))}</strong>
+            <span>${kind === "agent" ? "connect model + prompt" : kind === "run" ? "entry point" : "AIF object"}</span>
+          </button>
+        `).join("")}
+        <form id="wire-form" class="wire-form">
+          <h3>Wire Objects</h3>
+          <label>From <select id="wire-from">${blockOptions}</select></label>
+          <label>To <select id="wire-to">${blockOptions}</select></label>
+          <label>Pointer
+            <select id="wire-label">
+              <option value="runs">runs</option>
+              <option value="model">model</option>
+              <option value="prompt">prompt</option>
+            </select>
+          </label>
+          <button type="submit">Add Wire</button>
+        </form>
+        ${promptBlocks.length ? `
+          <div class="prompt-editor-list">
+            <h3>Prompt Text</h3>
+            ${promptBlocks.map((block) => `
+              <label>${esc(block.name)}
+                <textarea class="small-textarea drag-prompt-input" data-prompt-block="${esc(block.id)}">${esc(block.promptText || "Answer clearly and briefly: {input}")}</textarea>
+              </label>
+            `).join("")}
+          </div>
+        ` : ""}
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>Canvas</h2><span class="helper-text">${state.dragPointBlocks.length} blocks, ${state.dragPointWires.length} wires</span></div>
+        <div id="drag-canvas" class="drag-canvas">
+          <svg class="drag-wire-layer" viewBox="0 0 900 460" preserveAspectRatio="none">
+            <defs><marker id="drag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+            <g>${wires}</g>
+          </svg>
+          ${state.dragPointBlocks.map((block) => `
+            <div class="drag-point-block ${esc(block.kind)}" draggable="true" data-block-id="${esc(block.id)}" style="left:${block.x}px; top:${block.y}px">
+              <span>${esc(dragPointBlockTitle(block.kind))}</span>
+              <strong>${esc(block.name)}</strong>
+              <button class="block-remove" data-remove-block="${esc(block.id)}" title="Remove block">x</button>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+      <section class="panel drag-source-panel">
+        <div class="panel-head"><h2>Generated Source</h2><span class="helper-text">compiler input</span></div>
+        <pre id="drag-generated-source">${esc(source)}</pre>
+      </section>
+    </div>`;
+}
+
+function graphPage() {
+  const nodes = objectGraphNodes();
   const pos = new Map(nodes.map((node) => [node.object.object_id, node]));
+  const trace = new Set(state.lastRunTrace);
+  const graphWidth = Math.max(980, ...nodes.map((node) => node.x + 250));
+  const graphHeight = Math.max(620, ...nodes.map((node) => node.y + 130));
   const edges = state.objects.flatMap((object) =>
     object.pointers.map((pointer) => {
       const a = pos.get(object.object_id);
       const b = pos.get(pointer.target_object_id);
       if (!a || !b) return "";
-      return `<line x1="${a.x + 90}" y1="${a.y + 28}" x2="${b.x}" y2="${b.y + 28}" />
-              <text x="${(a.x + b.x) / 2 + 40}" y="${(a.y + b.y) / 2 + 20}">${esc(pointer.pointer_type)}</text>`;
+      const highlighted = trace.has(object.object_id) && trace.has(pointer.target_object_id);
+      const path = connectorPath(a, b, 198, 72);
+      return `<path class="${highlighted ? "hot" : ""}" d="${path.d}" />
+              <text x="${path.labelX}" y="${path.labelY}">${esc(pointer.pointer_type)}</text>`;
     })
   ).join("");
   return `
-    ${pageHeader("Graph", "Pointer relationships between AIF objects and runtime execution targets.")}
-    <div class="split">
+    ${pageHeader("Graph", "Pointer relationships between compiled AIF objects and the last PointRun VM position.")}
+    <div class="graph-page-grid">
       <section class="panel">
-        <div class="panel-head"><h2>Object Graph</h2><span class="helper-text">Visual topology</span></div>
-        <svg class="graph" viewBox="0 0 900 620">
-          <g class="edges">${edges}</g>
+        <div class="panel-head">
+          <h2>Object Graph</h2>
+          <span class="helper-text">${state.lastRunObjectId ? `VM at ${esc(state.lastRunObjectId)}` : "drag blocks or run to place VM marker"}</span>
+        </div>
+        <div id="object-graph-canvas" class="graph-canvas" style="--graph-width:${graphWidth}px; --graph-height:${graphHeight}px">
+          <svg class="graph-wire-layer" viewBox="0 0 ${graphWidth} ${graphHeight}">
+            <defs><marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+            <g class="edges">${edges}</g>
+          </svg>
           ${nodes.map(({ object, x, y }) => `
-            <g class="node ${object.start_flag ? "start" : ""}" data-object="${esc(object.object_id)}" transform="translate(${x}, ${y})">
-              <rect width="180" height="58" rx="7"></rect>
-              <text x="12" y="24">${esc(object.name)}</text>
-              <text x="12" y="44">${esc(object.type)}</text>
-            </g>`).join("")}
-        </svg>
+            <button class="graph-object-block ${object.type} ${object.start_flag ? "start" : ""} ${trace.has(object.object_id) ? "visited" : ""}" draggable="true" data-object="${esc(object.object_id)}" data-graph-object="${esc(object.object_id)}" style="left:${x}px; top:${y}px">
+              <span>${esc(object.type)}${object.start_flag ? " / start" : ""}</span>
+              <strong>${esc(object.name)}</strong>
+              <small>${esc(object.object_id)}</small>
+              ${state.lastRunObjectId === object.object_id ? `<i class="vm-marker">VM</i>` : ""}
+            </button>`).join("")}
+        </div>
       </section>
       ${inspector(true)}
     </div>`;
@@ -609,7 +887,7 @@ function adminAuthPage() {
         ${pending.length ? pending.map(requestCard).join("") : `<p class="subtle no-margin">No pending privilege requests.</p>`}
         <h3>History</h3>
         ${state.privilegeRequests.slice(0, 12).map((request) => `
-          <p class="request-line"><strong>${esc(request.username)}</strong> ${esc(request.status)} ${esc(request.privilege)}</p>
+          <p class="request-line"><strong>${esc(request.username)}</strong> ${esc(request.status)} ${esc(request.privilege)}<br><span>${esc(respondedBy(request))}</span></p>
         `).join("")}
       </section>
     </div>`;
@@ -673,7 +951,54 @@ function userAuthPage() {
           <button type="submit" ${available.length ? "" : "disabled"}>Request Privilege</button>
         </form>
         <h3>Requests</h3>
-        ${state.privilegeRequests.map((request) => `<p class="request-line">${esc(request.privilege)}: <strong>${esc(request.status)}</strong></p>`).join("")}
+        ${state.privilegeRequests.map((request) => `<p class="request-line">${esc(request.privilege)}: <strong>${esc(request.status)}</strong><br><span>${esc(respondedBy(request))}</span></p>`).join("")}
+      </section>
+    </div>`;
+}
+
+function formatTime(ts?: number | null) {
+  if (!ts) return "";
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function respondedBy(request: PrivilegeRequest) {
+  if (request.status === "pending") return "waiting for admin response";
+  return `responded by ${request.resolver_username || "unknown admin"}`;
+}
+
+function notificationsPage() {
+  const unread = state.notifications.filter((notification) => !notification.seen).length;
+  const resolved = state.privilegeRequests.filter((request) => request.status !== "pending");
+  return `
+    ${pageHeader("Notifications", "Review alerts, access decisions, and privilege request responses.", `<button id="mark-notifications-seen" class="ghost">Mark All Read</button>`)}
+    <div class="notifications-grid">
+      <section class="panel">
+        <div class="panel-head"><h2>Notification Center</h2><span class="helper-text">${unread} unread</span></div>
+        <div class="notification-list">
+          ${state.notifications.length ? state.notifications.map((notification) => `
+            <article class="notification-card ${notification.seen ? "" : "unread"}">
+              <div>
+                <strong>${esc(notification.message)}</strong>
+                <p>${esc(notification.kind)}${formatTime(notification.created_at) ? ` - ${esc(formatTime(notification.created_at))}` : ""}</p>
+              </div>
+              ${notification.seen ? `<span class="badge">read</span>` : `<span class="pill ok">new</span>`}
+            </article>
+          `).join("") : `<p class="subtle no-margin">No notifications yet.</p>`}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>Privilege Responses</h2><span class="helper-text">${resolved.length} handled</span></div>
+        <div class="notification-list">
+          ${state.privilegeRequests.length ? state.privilegeRequests.map((request) => `
+            <article class="notification-card ${request.status === "pending" ? "pending" : ""}">
+              <div>
+                <strong>${esc(request.username)} requested ${esc(request.privilege)}</strong>
+                <p>${esc(request.status)} - ${esc(respondedBy(request))}${request.resolved_at ? ` - ${esc(formatTime(request.resolved_at))}` : ""}</p>
+              </div>
+              <span class="badge">${esc(request.status)}</span>
+            </article>
+          `).join("") : `<p class="subtle no-margin">No privilege request history yet.</p>`}
+        </div>
       </section>
     </div>`;
 }
@@ -688,9 +1013,11 @@ function pageHtml() {
     case "Objects": return objectsPage();
     case "Graph": return graphPage();
     case "IDE": return idePage();
+    case "Drag Points": return dragPointsPage();
     case "VM": return vmPage();
     case "Peers": return peersPage();
     case "Auth": return authPage();
+    case "Notifications": return notificationsPage();
     case "Settings": return settingsPage();
     default: return dashboard();
   }
@@ -757,9 +1084,14 @@ function bind() {
     render();
   });
   document.querySelectorAll<HTMLButtonElement>("[data-page]").forEach((button) => {
-    button.onclick = () => {
+    button.onclick = async () => {
       state.page = button.dataset.page ?? "Dashboard";
       render();
+      if (state.page === "Notifications" && state.user) {
+        await markNotificationsSeen().catch(() => undefined);
+        state.notifications = state.notifications.map((notification) => ({ ...notification, seen: 1 }));
+        render();
+      }
     };
   });
   document.querySelectorAll<HTMLButtonElement>("[data-toast]").forEach((button) => {
@@ -770,6 +1102,12 @@ function bind() {
       await refresh().catch(() => render());
     };
   });
+  document.querySelector("#mark-notifications-seen")?.addEventListener("click", async () => {
+    if (!state.user) return;
+    await markNotificationsSeen().catch(() => undefined);
+    state.notifications = state.notifications.map((notification) => ({ ...notification, seen: 1 }));
+    render();
+  });
   document.querySelectorAll<HTMLElement>("[data-object]").forEach((el) => {
     el.onclick = () => {
       state.selected = state.objects.find((object) => object.object_id === el.dataset.object) ?? state.selected;
@@ -777,15 +1115,15 @@ function bind() {
     };
   });
   document.querySelector("#run-start")?.addEventListener("click", async () => {
-    await runAction(async () => runStart());
+    await runAction(async () => runStart(), "run start", state.health?.start_object?.object_id ?? null);
   });
   document.querySelector("#run-selected")?.addEventListener("click", async () => {
     if (!state.selected) return;
-    await runAction(async () => pointRun(state.selected!.object_id));
+    await runAction(async () => pointRun(state.selected!.object_id), `pointrun ${state.selected.object_id}`, state.selected.object_id);
   });
   document.querySelector("#run-object")?.addEventListener("click", async () => {
     const id = (document.querySelector("#object-id") as HTMLInputElement).value;
-    await runAction(async () => pointRun(id));
+    await runAction(async () => pointRun(id), `pointrun ${id}`, id);
   });
   document.querySelector("#compile-source")?.addEventListener("click", async () => {
     const source = (document.querySelector("#source") as HTMLTextAreaElement).value;
@@ -825,7 +1163,7 @@ function bind() {
       toast("Compile the IDE source before running it.");
       return;
     }
-    await runAction(async () => runFile(state.ideOutputPath!), "run IDE file");
+    await runAction(async () => runFile(state.ideOutputPath!), "run IDE file", state.objects.find((object) => object.start_flag)?.object_id ?? null);
   });
   document.querySelector("#ide-pointrun")?.addEventListener("click", async () => {
     const objectId = (document.querySelector("#ide-object-id") as HTMLInputElement).value;
@@ -833,7 +1171,127 @@ function bind() {
       toast("Compile the IDE source before PointRun.");
       return;
     }
-    await runAction(async () => runFile(state.ideOutputPath!, objectId), `pointrun ${objectId}`);
+    await runAction(async () => runFile(state.ideOutputPath!, objectId), `pointrun ${objectId}`, objectId);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-drag-kind]").forEach((button) => {
+    button.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", `kind:${button.dataset.dragKind}`);
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-block-id]").forEach((blockEl) => {
+    blockEl.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", `block:${blockEl.dataset.blockId}`);
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-graph-object]").forEach((blockEl) => {
+    blockEl.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", `graph:${blockEl.dataset.graphObject}`);
+    });
+  });
+  const graphCanvas = document.querySelector<HTMLElement>("#object-graph-canvas");
+  if (graphCanvas) {
+    graphCanvas.addEventListener("dragover", (event) => event.preventDefault());
+    graphCanvas.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const payload = event.dataTransfer?.getData("text/plain") ?? "";
+      if (!payload.startsWith("graph:")) return;
+      const objectId = payload.slice(6);
+      const rect = graphCanvas.getBoundingClientRect();
+      state.graphNodePositions = {
+        ...state.graphNodePositions,
+        [objectId]: {
+          x: Math.max(12, event.clientX - rect.left + graphCanvas.scrollLeft - 98),
+          y: Math.max(12, event.clientY - rect.top + graphCanvas.scrollTop - 36)
+        }
+      };
+      render();
+    });
+  }
+  const dragCanvas = document.querySelector<HTMLElement>("#drag-canvas");
+  if (dragCanvas) {
+    dragCanvas.addEventListener("dragover", (event) => event.preventDefault());
+    dragCanvas.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const payload = event.dataTransfer?.getData("text/plain") ?? "";
+      const rect = dragCanvas.getBoundingClientRect();
+      const x = Math.max(8, Math.min(730, event.clientX - rect.left - 80));
+      const y = Math.max(8, Math.min(380, event.clientY - rect.top - 30));
+      if (payload.startsWith("kind:")) {
+        const kind = payload.slice(5) as DragPointKind;
+        const id = `dp-${kind}-${Date.now()}`;
+        state.dragPointBlocks = [
+          ...state.dragPointBlocks,
+          {
+            id,
+            kind,
+            name: dragPointDefaults(kind),
+            x,
+            y,
+            ...(kind === "prompt" ? { promptText: "Answer clearly and briefly: {input}" } : {})
+          }
+        ];
+      }
+      if (payload.startsWith("block:")) {
+        const id = payload.slice(6);
+        state.dragPointBlocks = state.dragPointBlocks.map((block) => block.id === id ? { ...block, x, y } : block);
+      }
+      render();
+    });
+  }
+  document.querySelectorAll<HTMLTextAreaElement>("[data-prompt-block]").forEach((textarea) => {
+    textarea.addEventListener("input", () => {
+      const id = textarea.dataset.promptBlock ?? "";
+      state.dragPointBlocks = state.dragPointBlocks.map((block) =>
+        block.id === id ? { ...block, promptText: textarea.value } : block
+      );
+      const sourcePanel = document.querySelector<HTMLElement>("#drag-generated-source");
+      if (sourcePanel) sourcePanel.textContent = dragPointSource();
+    });
+  });
+  document.querySelector("#wire-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const from = (document.querySelector("#wire-from") as HTMLSelectElement).value;
+    const to = (document.querySelector("#wire-to") as HTMLSelectElement).value;
+    const label = (document.querySelector("#wire-label") as HTMLSelectElement).value;
+    if (!from || !to || from === to) {
+      toast("Pick two different blocks for the wire.");
+      return;
+    }
+    state.dragPointWires = [
+      ...state.dragPointWires.filter((wire) => !(wire.from === from && wire.label === label)),
+      { id: `wire-${Date.now()}`, from, to, label }
+    ];
+    render();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-block]").forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      const id = button.dataset.removeBlock ?? "";
+      state.dragPointBlocks = state.dragPointBlocks.filter((block) => block.id !== id);
+      state.dragPointWires = state.dragPointWires.filter((wire) => wire.from !== id && wire.to !== id);
+      render();
+    };
+  });
+  document.querySelector("#drag-generate-source")?.addEventListener("click", () => {
+    state.formValues["ide-source"] = dragPointSource();
+    state.page = "IDE";
+    toast("Drag Points source sent to IDE.");
+    render();
+  });
+  document.querySelector("#drag-compile")?.addEventListener("click", async () => {
+    const source = dragPointSource();
+    state.formValues["ide-source"] = source;
+    try {
+      const result = await compileSource(source, "drag-points");
+      state.output = result.stdout || result.stderr || "compile completed";
+      state.ideOutputPath = result.output_path ?? state.ideOutputPath;
+      state.assistantMessages = [...state.assistantMessages, analyzeOpsContext("drag compile", source)];
+      await refresh();
+    } catch (error) {
+      state.output = String(error);
+      toast(String(error));
+      safeRender();
+    }
   });
   document.querySelector("#assistant-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -927,14 +1385,19 @@ function bind() {
   });
 }
 
-async function runAction(action: () => Promise<{ stdout: string; stderr: string }>, label = "run") {
+async function runAction(action: () => Promise<{ stdout: string; stderr: string }>, label = "run", requestedObjectId: string | null = null) {
   try {
     const result = await action();
     state.output = result.stdout || result.stderr;
+    const trace = runTraceFromOutput(state.output);
+    state.lastRunTrace = trace.length ? trace : requestedObjectId ? [requestedObjectId] : [];
+    state.lastRunObjectId = state.lastRunTrace.length ? state.lastRunTrace[state.lastRunTrace.length - 1] : requestedObjectId;
     state.assistantMessages = [...state.assistantMessages, analyzeOpsContext(label, formValue("ide-source", defaultSource), state.output)];
     await refresh();
   } catch (error) {
     state.output = String(error);
+    state.lastRunTrace = requestedObjectId ? [requestedObjectId] : [];
+    state.lastRunObjectId = requestedObjectId;
     state.assistantMessages = [...state.assistantMessages, analyzeOpsContext(label, formValue("ide-source", defaultSource), String(error))];
     toast(String(error));
   }
