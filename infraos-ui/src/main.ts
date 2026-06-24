@@ -1,10 +1,15 @@
+import "bootstrap/dist/css/bootstrap.min.css";
 import "./styles.css";
 import {
+  beginGitHubLink,
+  beginGitHubLogin,
   changeUserPrivilege,
   compileSource,
   createUser,
   deleteUser,
   discoverPeers,
+  exportGitHubToken,
+  getGitHubConfig,
   getHealth,
   getLogs,
   getMe,
@@ -12,7 +17,9 @@ import {
   getObjects,
   getPeers,
   getPrivileges,
+  getReceipts,
   getToken,
+  linkGitHubAccountToUser,
   listPrivilegeRequests,
   listUsers,
   login,
@@ -23,10 +30,12 @@ import {
   resolvePrivilegeRequest,
   runFile,
   runStart,
-  setToken
+  setToken,
+  listGitHubAccounts,
+  unlinkGitHubAccount
 } from "./api";
 import { connectEvents } from "./websocket";
-import type { AIFObject, AuthNotification, AuthUser, Health, LogEvent, PeerInfo, PrivilegeRequest } from "./types";
+import type { AIFObject, AuthNotification, AuthUser, GitHubAccount, GitHubOAuthConfig, Health, LogEvent, PeerInfo, PrivilegeRequest, RunReceipt } from "./types";
 
 type Toast = {
   id: number;
@@ -67,9 +76,14 @@ type State = {
   output: string;
   user: AuthUser | null;
   authUsers: AuthUser[];
+  githubConfig: GitHubOAuthConfig | null;
+  githubAccounts: GitHubAccount[];
   privileges: string[];
   privilegeRequests: PrivilegeRequest[];
   notifications: AuthNotification[];
+  receipts: RunReceipt[];
+  runStatus: string;
+  lastReceiptCode: string | null;
   toasts: Toast[];
   formValues: Record<string, string | boolean>;
   assistantMessages: string[];
@@ -93,9 +107,14 @@ const state: State = {
   output: "",
   user: null,
   authUsers: [],
+  githubConfig: null,
+  githubAccounts: [],
   privileges: [],
   privilegeRequests: [],
   notifications: [],
+  receipts: [],
+  runStatus: "Idle",
+  lastReceiptCode: null,
   toasts: [],
   formValues: {},
   assistantMessages: [
@@ -185,10 +204,7 @@ port api {
     protocol = "http"
     host = "127.0.0.1"
     port = PORT
-
-    on_request {
-        return helper
-    }
+    route = helper
 }
 
 run port api`;
@@ -230,7 +246,7 @@ function clearFormValues(ids: string[]) {
 }
 
 function pages() {
-  return ["Dashboard", "Objects", "Graph", "IDE", "Drag Points", "VM", "Peers", "Auth", "Notifications", "Settings"];
+  return ["Dashboard", "Objects", "Graph", "IDE", "Drag Points", "VM", "Receipts", "Peers", "Auth", "Notifications", "Settings"];
 }
 
 function pageMeta(page: string) {
@@ -241,6 +257,7 @@ function pageMeta(page: string) {
     IDE: { icon: "ID", group: "Runtime" },
     "Drag Points": { icon: "DP", group: "Runtime" },
     VM: { icon: "VM", group: "Runtime" },
+    Receipts: { icon: "RC", group: "Runtime" },
     Peers: { icon: "NW", group: "Runtime" },
     Auth: { icon: "AU", group: "Access" },
     Notifications: { icon: "NT", group: "Access" },
@@ -265,11 +282,21 @@ function toast(message: string, action?: "auth") {
 
 async function refreshAuth() {
   if (!getToken()) return;
-  state.user = await getMe();
-  state.privileges = await getPrivileges();
-  state.privilegeRequests = await listPrivilegeRequests();
-  if (isAdmin()) {
-    state.authUsers = await listUsers();
+  try {
+    state.user = await getMe();
+    state.privileges = await getPrivileges();
+    state.privilegeRequests = await listPrivilegeRequests();
+    state.githubAccounts = await listGitHubAccounts().catch(() => []);
+    if (isAdmin()) {
+      state.authUsers = await listUsers();
+    }
+  } catch (error) {
+    setToken(null);
+    state.user = null;
+    state.authUsers = [];
+    state.githubAccounts = [];
+    state.privilegeRequests = [];
+    throw error;
   }
 }
 
@@ -297,20 +324,35 @@ function shouldToastNotification(notification: AuthNotification) {
 }
 
 async function refresh() {
-  const [health, objects, peers, logs] = await Promise.all([getHealth(), getObjects(), getPeers(), getLogs()]);
+  const health = await getHealth();
   state.health = health;
-  state.objects = objects;
-  state.peers = peers;
-  state.logs = logs;
-  state.selected = state.selected ?? objects.find((object) => object.start_flag) ?? objects[0] ?? null;
+  state.githubConfig = await getGitHubConfig().catch(() => state.githubConfig);
   if (state.user) {
+    const [objects, peers, logs, receipts] = await Promise.all([
+      getObjects().catch(() => []),
+      getPeers().catch(() => []),
+      getLogs().catch(() => []),
+      getReceipts(formValue("receipt-search")).catch(() => [])
+    ]);
+    state.objects = objects;
+    state.peers = peers;
+    state.logs = logs;
+    state.receipts = receipts;
+    state.selected = state.selected ?? objects.find((object) => object.start_flag) ?? objects[0] ?? null;
     await refreshAuth();
     await refreshNotifications();
+  } else {
+    state.objects = [];
+    state.peers = [];
+    state.logs = [];
+    state.receipts = [];
+    state.selected = null;
   }
   safeRender();
 }
 
 async function boot() {
+  consumeGitHubCallback();
   if (getToken()) {
     try {
       await refreshAuth();
@@ -321,6 +363,18 @@ async function boot() {
     }
   }
   await refresh();
+}
+
+function consumeGitHubCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  const github = params.get("github");
+  const message = params.get("message");
+  if (token) setToken(token);
+  if (github && message) toast(`GitHub ${github}: ${message}`);
+  if (github || token) {
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
 }
 
 function loginPage() {
@@ -340,9 +394,13 @@ function loginPage() {
         <form id="login-form" class="login-form">
           <h2>Sign in</h2>
           <label>Username <input id="login-username" autocomplete="username" value="${esc(formValue("login-username", "admin"))}"></label>
-          <label>Password <input id="login-password" type="password" autocomplete="current-password" value="${esc(formValue("login-password", "admin"))}"></label>
+          <label>Password <input id="login-password" type="password" autocomplete="current-password" value="${esc(formValue("login-password", ""))}"></label>
           <button type="submit">Sign In</button>
-          <p class="helper-text">Default development login is admin / admin.</p>
+          <button type="button" id="github-login" class="github-button" ${state.githubConfig?.configured ? "" : "disabled"}>
+            Sign in with GitHub
+          </button>
+          <p class="helper-text">${state.githubConfig?.configured ? `GitHub redirect: ${esc(state.githubConfig.redirect_uri)}` : "GitHub OAuth needs GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET."}</p>
+          <p class="helper-text">First-run password is in data/admin-password.txt unless INFRAOS_ADMIN_PASSWORD is set.</p>
         </form>
       </section>
       ${toastHtml()}
@@ -350,108 +408,226 @@ function loginPage() {
 }
 
 function nav() {
-  const grouped = pages().reduce<Record<string, string[]>>((acc, page) => {
-    const group = pageMeta(page).group;
-    acc[group] = [...(acc[group] ?? []), page];
-    return acc;
-  }, {});
+  const primary = ["Dashboard", "Objects", "Graph", "IDE", "Drag Points", "VM", "Receipts", "Auth"];
   return `
-    <aside class="sidebar">
-      <div class="brand-block">
-        <div class="brand">VM</div>
-        <div>
-          <strong>InfraOS</strong>
-          <span>${esc(state.health?.server_name ?? "Local Server")}</span>
-        </div>
-      </div>
-      ${Object.entries(grouped).map(([group, groupPages]) => `
-        <div class="nav-group">
-          <div class="nav-heading">${esc(group)}</div>
-          ${groupPages.map((page) => {
-            const meta = pageMeta(page);
-            return `<button class="nav ${state.page === page ? "active" : ""}" data-page="${page}">
-              <span class="nav-icon">${esc(meta.icon)}</span>
-              <span>${esc(page)}</span>
-            </button>`;
-          }).join("")}
-        </div>
-      `).join("")}
+    <aside class="service-rail">
+      <button class="rail-toggle" aria-label="Open service menu">☰</button>
+      ${primary.map((page) => {
+        const meta = pageMeta(page);
+        return `<button class="rail-item ${state.page === page ? "active" : ""}" title="${esc(page)}" data-page="${page}">
+          <span>${esc(meta.icon.slice(0, 2))}</span>
+        </button>`;
+      }).join("")}
     </aside>`;
 }
 
 function topbar() {
-  const providers = state.health?.providers ? Object.entries(state.health.providers as Record<string, boolean>) : [];
-  const ready = providers.filter(([, ok]) => ok).length;
+  const providers = providerEntries();
+  const ready = liveProviderCount();
   const unread = state.notifications.filter((notification) => !notification.seen).length;
   return `
     <header class="topbar">
-      <div class="crumbs">
-        <span>Console</span>
-        <strong>${esc(state.page)}</strong>
+      <div class="top-left">
+        <button class="service-grid" aria-label="Services">▦</button>
+        <img class="top-logo" src="/AInfra.png" alt="AInfra">
+        <div class="console-search">
+          <span>⌕</span>
+          <input aria-label="Search resources" placeholder="Search" value="">
+          <kbd>Option+S</kbd>
+        </div>
       </div>
       <div class="top-actions">
-        <div class="search-box">Search resources</div>
-        <div class="provider-strip">
-          <span class="health-chip">${ready}/${providers.length} providers ready</span>
-        </div>
-        <button class="ghost notification-button" data-page="Notifications">Notifications${unread ? ` <span>${unread}</span>` : ""}</button>
+        <button class="top-icon" title="Cloud shell">▻</button>
+        <button class="top-icon notification-button" title="Notifications" data-page="Notifications">⌂${unread ? ` <span>${unread}</span>` : ""}</button>
+        <button class="top-icon" title="Help">?</button>
+        <button class="top-icon" title="Settings" data-page="Settings">⚙</button>
+        <button class="region-select">Local VM ▾</button>
+        <span class="health-chip">${ready}/${providers.length} live</span>
         <div class="user-chip">${esc(state.user?.username ?? "user")}</div>
-        <button id="logout" class="ghost">Sign Out</button>
+        <button id="logout" class="account-menu">Sign Out ▾</button>
       </div>
     </header>`;
 }
 
 function dashboard() {
   const start = state.health?.start_object;
-  const providers = state.health?.providers ? Object.entries(state.health.providers as Record<string, boolean>) : [];
-  const ready = providers.filter(([, ok]) => ok).length;
+  const providers = providerEntries();
+  const ready = liveProviderCount();
+  const recentObjects = state.objects.slice(0, 8);
   return `
-    ${pageHeader(
-      state.health?.server_name ?? "VM Server",
-      `${state.objects.length} AIF resources loaded. Start object: ${start?.object_id ?? "none"}.`,
-      `<button data-page="IDE">Open IDE</button><button id="run-start" class="ghost">Run Start</button>`
-    )}
-    <div class="overview-grid">
-      ${card("AIF Objects", String(state.objects.length), "Registry entries", "Objects")}
-      ${card("IDE", "Ready", "Compile and run source", "IDE")}
-      ${card("Runtime Peers", String(state.peers.length), "Local network endpoints", "Peers")}
-      ${card("Providers", `${ready}/${providers.length}`, "Configured model engines", "Settings")}
-    </div>
-    <div class="dashboard-grid">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Provider Health</h2>
-          <span class="helper-text">${ready} ready</span>
+    <section class="console-titlebar">
+      <div>
+        <h1>Console Home</h1>
+        <span>Info</span>
+      </div>
+      <div class="console-title-actions">
+        <button class="ghost">Reset to default layout</button>
+        <button data-page="IDE" class="accent-button">＋ Add object</button>
+        <button id="run-start" class="accent-button">Run Start</button>
+      </div>
+    </section>
+    ${runStatusBar()}
+    <div class="console-home-grid">
+      <section class="aws-widget recently-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>Recently visited</h2>
+          <a>Info</a>
+          <button>⋮</button>
+        </div>
+        <div class="service-list">
+          ${[
+            ["Objects", "Objects", "OB", "#2563eb"],
+            ["Graph", "Graph", "GR", "#7c3aed"],
+            ["VM Runtime", "VM", "VM", "#0f766e"],
+            ["AInfra IDE", "IDE", "ID", "#ea580c"],
+            ["Drag Points", "Drag Points", "DP", "#db2777"],
+            ["Run Receipts", "Receipts", "RC", "#4f46e5"],
+            ["Auth", "Auth", "AU", "#16a34a"],
+            ["Settings", "Settings", "ST", "#0891b2"]
+          ].map(([label, page, icon, color]) => `
+            <button class="service-link" data-page="${esc(page)}">
+              <span style="background:${esc(color)}">${esc(icon)}</span>
+              ${esc(label)}
+            </button>
+          `).join("")}
+        </div>
+        <button class="widget-footer" data-page="Objects">View all services</button>
+      </section>
+
+      <section class="aws-widget security-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>Runtime Security</h2>
+          <a>Info</a>
+          <button>⋮</button>
+        </div>
+        <p class="widget-subtitle">Server: ${esc(state.health?.server_name ?? "Local")}</p>
+        <div class="security-score">
+          <div>
+            <span>Run readiness</span>
+            <strong>${state.runStatus.toLowerCase().includes("failure") ? "62%" : "91%"}</strong>
+          </div>
+          <div class="score-details">
+            <p><a>Live providers</a><strong>${ready}/${providers.length}</strong></p>
+            <p><a>Receipts</a><strong>${state.receipts.length}</strong></p>
+            <p><a>Open notifications</a><strong>${unreadCount()}</strong></p>
+          </div>
+        </div>
+        <button class="widget-footer" data-page="VM">Go to VM Runtime</button>
+      </section>
+
+      <section class="aws-widget welcome-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>Welcome to AInfra</h2>
+          <button>⋮</button>
+        </div>
+        ${welcomeLink("⌁", "Getting started with AIF", "Compile objects, wire PointRun, and execute through InfraVM.", "IDE")}
+        ${welcomeLink("◈", "Drag and drop builder", "Create models, prompts, agents, and runs without typing code.", "Drag Points")}
+        ${welcomeLink("□", "What is new?", "Review receipts, providers, auth, and VM events.", "Receipts")}
+      </section>
+
+      <section class="aws-widget cost-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>Run and usage</h2>
+          <a>Info</a>
+          <button>⋮</button>
+        </div>
+        <div class="usage-layout">
+          <div class="usage-numbers">
+            <span>Current VM runs</span>
+            <strong>${state.receipts.length}</strong>
+            <p>${state.lastReceiptCode ? `Latest receipt ${esc(state.lastReceiptCode)}` : "No receipt yet"}</p>
+            <span>AIF resources</span>
+            <strong>${state.objects.length}</strong>
+            <p>Start object ${esc(start?.object_id ?? "none")}</p>
+          </div>
+          <div class="usage-chart" aria-label="Usage chart">
+            ${[42, 38, 52, 168, 166, 86].map((height, index) => `
+              <div class="chart-month">
+                <div class="bar-stack" style="height:${height}px">
+                  <i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i>
+                </div>
+                <span>${["Jan", "Feb", "Mar", "Apr", "May", "Jun"][index]}</span>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      </section>
+
+      <section class="aws-widget health-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>AInfra Health</h2>
+          <a>Info</a>
+          <button>⋮</button>
+        </div>
+        ${healthLine("Failed runs", state.runStatus.toLowerCase().includes("failure") ? "1" : "0", "Past 7 runs")}
+        ${healthLine("Scheduled changes", String(state.logs.filter((log) => log.kind === "compile").length), "Compile events")}
+        ${healthLine("Other notifications", String(unreadCount()), "Current user")}
+      </section>
+
+      <section class="aws-widget resources-widget">
+        <div class="widget-head">
+          <span class="drag-handle">⠿</span>
+          <h2>AIF resource inventory</h2>
+          <a>Info</a>
+          <button>⋮</button>
         </div>
         <table>
-          <thead><tr><th>Provider</th><th>Status</th></tr></thead>
+          <thead><tr><th>Object</th><th>Type</th><th>Pointers</th></tr></thead>
           <tbody>
-            ${providers.map(([name, ok]) => `<tr><td>${esc(name)}</td><td>${statusBadge(ok ? "ready" : "missing")}</td></tr>`).join("")}
+            ${recentObjects.map((object) => `<tr data-object="${esc(object.object_id)}"><td>${esc(object.object_id)}</td><td>${esc(object.type)}</td><td>${object.pointers.length}</td></tr>`).join("")}
           </tbody>
         </table>
       </section>
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Recent Events</h2>
-          <span class="helper-text">${state.logs.length} events</span>
-        </div>
-        <div class="event-list">
-          ${state.logs.slice(-6).reverse().map((log) => `<p><span>${esc(log.kind)}</span>${esc(log.message)}</p>`).join("") || `<p><span>idle</span>No VM events yet.</p>`}
-        </div>
-      </section>
     </div>
     ${consolePanel("Runtime Console")}`;
+}
+
+function unreadCount() {
+  return state.notifications.filter((notification) => !notification.seen).length;
+}
+
+function welcomeLink(icon: string, title: string, copy: string, page: string) {
+  return `<button class="welcome-link" data-page="${esc(page)}">
+    <span>${esc(icon)}</span>
+    <strong>${esc(title)} ↗</strong>
+    <p>${esc(copy)}</p>
+  </button>`;
+}
+
+function healthLine(label: string, value: string, note: string) {
+  return `<div class="health-line">
+    <span>${esc(label)}</span>
+    <strong>${esc(value)}</strong>
+    <p>${esc(note)}</p>
+  </div>`;
 }
 
 function pageHeader(title: string, description: string, actions = "") {
   return `
     <section class="page-header">
       <div>
-        <div class="eyebrow">VM Console</div>
+        <div class="eyebrow">AInfra Console</div>
         <h1>${esc(title)}</h1>
         <p>${esc(description)}</p>
       </div>
       <div class="header-actions">${actions}</div>
+    </section>`;
+}
+
+function runStatusBar() {
+  const status = state.runStatus.toLowerCase().includes("running") ? "running" : state.runStatus.toLowerCase().includes("failure") ? "failed" : "ok";
+  return `
+    <section class="run-status-bar">
+      <div>
+        <span class="status ${status === "ok" ? "ok" : "warn"}"><i></i>${esc(state.runStatus)}</span>
+        <strong>${state.lastReceiptCode ? `Receipt ${esc(state.lastReceiptCode)}` : "No run receipt yet"}</strong>
+      </div>
+      <button class="ghost small" data-page="Receipts">Open Receipts</button>
     </section>`;
 }
 
@@ -465,8 +641,29 @@ function card(title: string, value: string, note: string, page?: string) {
 }
 
 function statusBadge(status: string) {
-  const ok = status === "ready" || status === "running" || status === "ok";
+  const ok = status === "ready" || status === "running" || status === "ok" || status === "live";
   return `<span class="status ${ok ? "ok" : "warn"}"><i></i>${esc(status)}</span>`;
+}
+
+function providerEntries() {
+  const details = state.health?.provider_details;
+  if (details) return Object.entries(details);
+  const providers = state.health?.providers ?? {};
+  return Object.entries(providers).map(([name, configured]) => [
+    name,
+    { configured, runtime: configured ? "live" : "stub", message: configured ? "Configured" : "Missing key" }
+  ] as const);
+}
+
+function liveProviderCount() {
+  return providerEntries().filter(([, info]) => info.configured && info.runtime === "live").length;
+}
+
+function providerRows() {
+  return providerEntries().map(([name, info]) => {
+    const status = info.runtime === "live" && info.configured ? "live" : info.runtime === "stub" ? "stub" : "missing";
+    return `<tr><td>${esc(name)}</td><td>${statusBadge(status)}</td><td>${esc(info.message)}</td></tr>`;
+  }).join("");
 }
 
 function objectsPage() {
@@ -617,7 +814,7 @@ function dragPointSource() {
   for (const block of byKind("port")) {
     const target = wireTargets(block, "runs")[0] ?? byKind("agent")[0];
     lines.push(`port ${block.name} {`, `    protocol = "http"`, `    host = "127.0.0.1"`, `    port = 8080`);
-    if (target) lines.push("", "    on_request {", `        return ${target.name}`, "    }");
+    if (target) lines.push(`    route = ${target.name}`);
     lines.push(`}`, "");
   }
   const runBlocks = byKind("run");
@@ -765,6 +962,7 @@ function inspector(withRun = false) {
 function vmPage() {
   return `
     ${pageHeader("VM Runtime", "Compile source, run the start object, or PointRun a specific object.", `<button id="run-start">Run Start</button>`)}
+    ${runStatusBar()}
     <div class="split">
       <section class="panel">
         <div class="panel-head"><h2>Run Control</h2><span class="helper-text">AInfra input</span></div>
@@ -782,6 +980,7 @@ function idePage() {
   const source = formValue("ide-source", defaultSource);
   return `
     ${pageHeader("AInfra IDE", "Write objects, compile to AIF, inspect the result, then run the VM from one workspace.", `<button id="ide-compile">Compile</button><button id="ide-run" class="ghost">Run Start</button>`)}
+    ${runStatusBar()}
     <div class="ide-grid">
       <section class="panel ide-editor">
         <div class="panel-head">
@@ -842,7 +1041,6 @@ function peersPage() {
 }
 
 function settingsPage() {
-  const providers = state.health?.providers ? Object.entries(state.health.providers as Record<string, boolean>) : [];
   return `
     ${pageHeader("Settings", "Server configuration, provider key status, and local runtime paths.")}
     <section class="panel">
@@ -852,7 +1050,7 @@ function settingsPage() {
           <tr><td>Server</td><td><strong>${esc(state.health?.server_name ?? "unknown")}</strong></td></tr>
           <tr><td>Backend</td><td><code>${esc(import.meta.env.VITE_API_BASE ?? "http://localhost:8000")}</code></td></tr>
           <tr><td>Autostart</td><td>${statusBadge(state.health?.autostart ? "ready" : "missing")}</td></tr>
-          ${providers.map(([name, ok]) => `<tr><td>${esc(name)}</td><td>${statusBadge(ok ? "ready" : "missing")}</td></tr>`).join("")}
+          ${providerRows()}
         </tbody>
       </table>
     </section>`;
@@ -889,6 +1087,7 @@ function adminAuthPage() {
         ${state.privilegeRequests.slice(0, 12).map((request) => `
           <p class="request-line"><strong>${esc(request.username)}</strong> ${esc(request.status)} ${esc(request.privilege)}<br><span>${esc(respondedBy(request))}</span></p>
         `).join("")}
+        ${githubAccountsPanel(true)}
       </section>
     </div>`;
 }
@@ -952,8 +1151,55 @@ function userAuthPage() {
         </form>
         <h3>Requests</h3>
         ${state.privilegeRequests.map((request) => `<p class="request-line">${esc(request.privilege)}: <strong>${esc(request.status)}</strong><br><span>${esc(respondedBy(request))}</span></p>`).join("")}
+        ${githubAccountsPanel(false)}
       </section>
     </div>`;
+}
+
+function githubAccountsPanel(adminView: boolean) {
+  return `
+    <div class="github-auth-panel">
+      <div class="panel-head">
+        <h2>GitHub Accounts</h2>
+        <span class="helper-text">${state.githubAccounts.length} linked</span>
+      </div>
+      <button id="github-link" class="github-button" ${state.githubConfig?.configured ? "" : "disabled"}>Link GitHub Account</button>
+      <p class="helper-text">${state.githubConfig?.configured ? `OAuth scopes: ${esc(state.githubConfig.scopes)}` : "Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET to enable GitHub OAuth."}</p>
+      <div class="github-account-list">
+        ${state.githubAccounts.length ? state.githubAccounts.map((account) => githubAccountCard(account, adminView)).join("") : `<p class="subtle no-margin">No GitHub accounts linked yet.</p>`}
+      </div>
+    </div>`;
+}
+
+function githubAccountCard(account: GitHubAccount, adminView: boolean) {
+  return `
+    <article class="github-account-card">
+      ${account.avatar_url ? `<img src="${esc(account.avatar_url)}" alt="">` : `<span class="github-avatar">GH</span>`}
+      <div>
+        <strong>${esc(account.login)}</strong>
+        <p>${adminView ? `Linked AInfra account ${esc(account.username)} - ` : ""}${esc(account.name || account.email || "GitHub account")}</p>
+        <p class="helper-text">Scopes: ${esc(account.scope || "none reported")}</p>
+        ${adminView ? `
+          <label class="github-link-select">AInfra account
+            <select data-github-link-user="${account.id}">
+              ${state.authUsers.map((user) => `<option value="${user.id}" ${user.id === account.user_id ? "selected" : ""}>${esc(user.username)}${user.is_admin || user.privileges.includes("admin") ? " (admin)" : ""}</option>`).join("")}
+            </select>
+          </label>
+          <div class="privilege-list compact">
+            ${state.privileges.map((privilege) => {
+              const enabled = account.privileges.includes(privilege);
+              return `<button class="privilege-toggle ${enabled ? "enabled" : ""}" data-user="${account.user_id}" data-privilege="${esc(privilege)}" data-enabled="${enabled}">
+                ${enabled ? "Revoke" : "Grant"} ${esc(privilege)}
+              </button>`;
+            }).join("")}
+          </div>
+        ` : ""}
+      </div>
+      <div class="github-actions">
+        <button class="ghost small" data-export-github="${account.id}">Export token</button>
+        <button class="danger small" data-unlink-github="${account.id}">Unlink</button>
+      </div>
+    </article>`;
 }
 
 function formatTime(ts?: number | null) {
@@ -1003,6 +1249,47 @@ function notificationsPage() {
     </div>`;
 }
 
+function shortHash(hash: string) {
+  return hash.length > 18 ? `${hash.slice(0, 18)}...` : hash;
+}
+
+function receiptsPage() {
+  const query = formValue("receipt-search");
+  return `
+    ${pageHeader("Run Receipts", "Search VM run receipts by short code, hash, status, object, file, or authorized user.", `<button id="refresh-receipts" class="ghost">Refresh</button>`)}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Receipt Lookup</h2>
+        <span class="helper-text">${state.receipts.length} receipts</span>
+      </div>
+      <form id="receipt-search-form" class="inline-form">
+        <label>Search <input id="receipt-search" value="${esc(query)}" placeholder="15-char code, hash, user, object"></label>
+        <button type="submit">Search</button>
+      </form>
+      <table>
+        <thead><tr><th>Code</th><th>Status</th><th>Authorized</th><th>Object</th><th>Hash</th><th>When</th></tr></thead>
+        <tbody>
+          ${state.receipts.map((receipt) => `
+            <tr>
+              <td><code>${esc(receipt.code)}</code></td>
+              <td>${statusBadge(receipt.status === "Pass" ? "ok" : "failed")}</td>
+              <td>${esc(receipt.authorized_by)}</td>
+              <td>${esc(receipt.object_id || "run-file")}</td>
+              <td><code title="${esc(receipt.receipt_hash)}">${esc(shortHash(receipt.receipt_hash))}</code></td>
+              <td>${esc(formatTime(receipt.created_at))}</td>
+            </tr>
+            <tr class="receipt-detail-row">
+              <td colspan="6">
+                <strong>${esc(receipt.receipt_text)}</strong>
+                <span>File: ${esc(receipt.file_path || "registry start")}</span>
+              </td>
+            </tr>
+          `).join("") || `<tr><td colspan="6">No receipts found.</td></tr>`}
+        </tbody>
+      </table>
+    </section>`;
+}
+
 function consolePanel(title = "Console") {
   const text = state.output || state.logs.map((log) => `[${log.kind}] ${log.message}`).join("\n") || "Waiting for VM events...";
   return `<section class="panel"><div class="panel-head"><h2>${esc(title)}</h2><span class="helper-text">stdout / events</span></div><pre class="console">${esc(text)}</pre></section>`;
@@ -1015,6 +1302,7 @@ function pageHtml() {
     case "IDE": return idePage();
     case "Drag Points": return dragPointsPage();
     case "VM": return vmPage();
+    case "Receipts": return receiptsPage();
     case "Peers": return peersPage();
     case "Auth": return authPage();
     case "Notifications": return notificationsPage();
@@ -1038,7 +1326,7 @@ function render() {
   if (!state.user) {
     document.querySelector("#root")!.innerHTML = loginPage();
   } else {
-    document.querySelector("#root")!.innerHTML = `<div class="shell">${nav()}<main>${topbar()}<div class="workspace">${pageHtml()}</div></main>${toastHtml()}</div>`;
+    document.querySelector("#root")!.innerHTML = `<div class="shell">${topbar()}${nav()}<main><div class="workspace">${pageHtml()}</div></main>${toastHtml()}</div>`;
   }
   bind();
 }
@@ -1070,6 +1358,14 @@ function bind() {
       toast(String(error));
     }
   });
+  document.querySelector("#github-login")?.addEventListener("click", async () => {
+    try {
+      const result = await beginGitHubLogin();
+      window.location.href = result.auth_url;
+    } catch (error) {
+      toast(String(error));
+    }
+  });
   document.querySelector("#logout")?.addEventListener("click", async () => {
     try {
       await logout();
@@ -1079,6 +1375,7 @@ function bind() {
     setToken(null);
     state.user = null;
     state.authUsers = [];
+    state.githubAccounts = [];
     state.privilegeRequests = [];
     state.notifications = [];
     render();
@@ -1106,6 +1403,62 @@ function bind() {
     if (!state.user) return;
     await markNotificationsSeen().catch(() => undefined);
     state.notifications = state.notifications.map((notification) => ({ ...notification, seen: 1 }));
+    render();
+  });
+  document.querySelector("#github-link")?.addEventListener("click", async () => {
+    try {
+      const result = await beginGitHubLink();
+      window.location.href = result.auth_url;
+    } catch (error) {
+      toast(String(error));
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-export-github]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        const account = await exportGitHubToken(Number(button.dataset.exportGithub));
+        state.output = `GitHub token export for ${account.login} (${account.username})\nScopes: ${account.scope || "none reported"}\n\nexport GITHUB_TOKEN=${account.access_token ?? ""}`;
+        await navigator.clipboard?.writeText(account.access_token ?? "").catch(() => undefined);
+        toast(`GitHub token exported for ${account.login}`);
+        render();
+      } catch (error) {
+        toast(String(error));
+      }
+    };
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-unlink-github]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        await unlinkGitHubAccount(Number(button.dataset.unlinkGithub));
+        toast("GitHub account unlinked");
+        await refreshAuth();
+        render();
+      } catch (error) {
+        toast(String(error));
+      }
+    };
+  });
+  document.querySelectorAll<HTMLSelectElement>("[data-github-link-user]").forEach((select) => {
+    select.onchange = async () => {
+      try {
+        await linkGitHubAccountToUser(Number(select.dataset.githubLinkUser), Number(select.value));
+        toast("GitHub account linked to AInfra account");
+        await refreshAuth();
+        render();
+      } catch (error) {
+        toast(String(error));
+      }
+    };
+  });
+  document.querySelector("#receipt-search-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const query = (document.querySelector("#receipt-search") as HTMLInputElement | null)?.value ?? "";
+    state.formValues["receipt-search"] = query;
+    state.receipts = await getReceipts(query).catch(() => []);
+    render();
+  });
+  document.querySelector("#refresh-receipts")?.addEventListener("click", async () => {
+    state.receipts = await getReceipts(formValue("receipt-search")).catch(() => []);
     render();
   });
   document.querySelectorAll<HTMLElement>("[data-object]").forEach((el) => {
@@ -1385,17 +1738,32 @@ function bind() {
   });
 }
 
-async function runAction(action: () => Promise<{ stdout: string; stderr: string }>, label = "run", requestedObjectId: string | null = null) {
+async function runAction(action: () => Promise<{ ok?: boolean; stdout: string; stderr: string; receipt_code?: string | null; receipt_hash?: string | null; receipt_text?: string | null }>, label = "run", requestedObjectId: string | null = null) {
+  state.runStatus = `Running ${label}`;
+  state.output = `Starting ${label}...\nThe VM is loading the AIF file and following PointRun pointers.`;
+  safeRender();
   try {
     const result = await action();
-    state.output = result.stdout || result.stderr;
+    const receipt = result.receipt_code
+      ? `\nReceipt: ${result.receipt_code}\nReceipt text: ${result.receipt_text ?? ""}\nReceipt hash: ${result.receipt_hash ?? ""}`
+      : "";
+    state.lastReceiptCode = result.receipt_code ?? state.lastReceiptCode;
+    state.runStatus = result.stdout || result.stderr
+      ? `${result.receipt_code ? "Pass" : "Completed"} ${label}`
+      : `Completed ${label}`;
+    if ("ok" in result && result.ok === false) {
+      state.runStatus = `Failure ${label}`;
+    }
+    state.output = `${result.stdout || result.stderr || "VM run completed without stdout."}${receipt}`;
     const trace = runTraceFromOutput(state.output);
     state.lastRunTrace = trace.length ? trace : requestedObjectId ? [requestedObjectId] : [];
     state.lastRunObjectId = state.lastRunTrace.length ? state.lastRunTrace[state.lastRunTrace.length - 1] : requestedObjectId;
     state.assistantMessages = [...state.assistantMessages, analyzeOpsContext(label, formValue("ide-source", defaultSource), state.output)];
     await refresh();
+    if (state.runStatus.startsWith("Failure")) toast(state.runStatus);
   } catch (error) {
     state.output = String(error);
+    state.runStatus = `Failure ${label}`;
     state.lastRunTrace = requestedObjectId ? [requestedObjectId] : [];
     state.lastRunObjectId = requestedObjectId;
     state.assistantMessages = [...state.assistantMessages, analyzeOpsContext(label, formValue("ide-source", defaultSource), String(error))];
@@ -1430,7 +1798,7 @@ function analyzeOpsContext(intent: string, source: string, explicitOutput = "") 
     suggestions.push("The VM failed while reading output. Rebuild the compiler and VM, then recompile the source so the AIF format matches the runtime.");
   }
   if (sourceLower.includes("ollama")) {
-    suggestions.push("Ollama is a local stub in this prototype, so it should be the safest template for compile/run demos without cloud keys.");
+    suggestions.push("Ollama runs locally when available; if it is not listening, InfraVM returns deterministic local VM output so the run still produces a receipt and trace.");
   }
   if (!suggestions.length && historyLower.includes("openai connector failed")) {
     suggestions.push("Recent logs include OpenAI connector failures, but the active source does not require OpenAI unless you choose that template.");

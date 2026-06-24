@@ -21,6 +21,7 @@ export type Health = {
   start_object?: AIFObject | null;
   openai_key_available: boolean;
   providers?: Record<string, boolean>;
+  provider_details?: Record<string, { configured: boolean; runtime: "live" | "stub"; message: string }>;
   autostart: boolean;
 };
 
@@ -32,6 +33,32 @@ export type AuthUser = {
   email: string;
   is_admin: boolean;
   privileges: string[];
+};
+
+export type GitHubOAuthConfig = {
+  configured: boolean;
+  client_id_available: boolean;
+  redirect_uri: string;
+  scopes: string;
+};
+
+export type GitHubAccount = {
+  id: number;
+  user_id: number;
+  username: string;
+  full_name: string;
+  is_admin: boolean;
+  privileges: string[];
+  github_id: number;
+  login: string;
+  name: string;
+  email: string;
+  avatar_url: string;
+  scope: string;
+  token_type: string;
+  linked_at: number;
+  updated_at: number;
+  access_token?: string;
 };
 
 export type LoginResult = {
@@ -65,6 +92,23 @@ export type VMRunResult = {
   ok: boolean;
   stdout: string;
   stderr: string;
+  receipt_code?: string | null;
+  receipt_hash?: string | null;
+  receipt_text?: string | null;
+};
+
+export type RunReceipt = {
+  code: string;
+  receipt_hash: string;
+  status: string;
+  authorized_by: string;
+  authorized_user_id?: number | null;
+  object_id: string;
+  file_path: string;
+  receipt_text: string;
+  stdout: string;
+  stderr: string;
+  created_at: number;
 };
 
 export type CompileResult = {

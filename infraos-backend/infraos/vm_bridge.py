@@ -3,14 +3,43 @@ import re
 import subprocess
 import tempfile
 
+from fastapi import HTTPException
+
 from .config import COMPILER_BIN, INFRAVM_BIN, OBJECTS_DIR
 from .models import CompileRequest, CompileResult, VMRunResult
 from .registry import load_registry, get_start_object
+
+OBJECT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 
 def safe_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-")
     return cleaned or "workspace"
+
+
+def validate_object_id(object_id: str | None) -> str | None:
+    if object_id is None or object_id == "":
+        return None
+    if len(object_id) > 256 or not OBJECT_ID_RE.fullmatch(object_id):
+        raise HTTPException(status_code=400, detail="invalid object_id")
+    return object_id
+
+
+def resolve_object_file(file_path: str) -> Path:
+    OBJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    candidate = Path(file_path)
+    if not candidate.is_absolute():
+        candidate = OBJECTS_DIR / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        object_root = OBJECTS_DIR.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="AIF file does not exist") from exc
+    if object_root != resolved and object_root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="AIF file must live under data/objects")
+    if resolved.suffix != ".aif":
+        raise HTTPException(status_code=400, detail="run-file only accepts .aif files")
+    return resolved
 
 
 def compile_source(request: CompileRequest) -> CompileResult:
@@ -38,9 +67,11 @@ def compile_source(request: CompileRequest) -> CompileResult:
 
 
 def run_vm(file_path: str, object_id: str | None = None) -> VMRunResult:
-    cmd = [str(INFRAVM_BIN), file_path]
-    if object_id:
-        cmd.append(object_id)
+    resolved_file = resolve_object_file(file_path)
+    safe_object_id = validate_object_id(object_id)
+    cmd = [str(INFRAVM_BIN), str(resolved_file)]
+    if safe_object_id:
+        cmd.append(safe_object_id)
     proc = subprocess.run(
         cmd,
         text=True,
@@ -59,6 +90,7 @@ def run_start() -> VMRunResult:
 
 
 def pointrun(object_id: str) -> VMRunResult:
+    validate_object_id(object_id)
     objects = load_registry()
     obj = next((item for item in objects if item.object_id == object_id), None)
     if not obj or not obj.file_path:

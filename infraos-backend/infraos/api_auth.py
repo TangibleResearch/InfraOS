@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 
 from . import auth
 from .models import (
     CreateUserRequest,
+    LinkGitHubAccountRequest,
     LoginRequest,
     PrivilegeChangeRequest,
     PrivilegeRequestCreate,
@@ -15,6 +16,47 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 @router.post("/login")
 def login(request: LoginRequest):
     return auth.login(request.username, request.password)
+
+
+@router.get("/github/config")
+def github_config():
+    return auth.github_oauth_config()
+
+
+@router.post("/github/login")
+def github_login():
+    return auth.begin_github_oauth(mode="login")
+
+
+@router.post("/github/link")
+def github_link(user: dict = Depends(auth.require_user)):
+    return auth.begin_github_oauth(user=user, mode="link")
+
+
+@router.get("/github/callback")
+def github_callback(code: str = Query(default=""), state: str = Query(default="")):
+    return auth.complete_github_oauth(code, state)
+
+
+@router.get("/github/accounts")
+def github_accounts(user: dict = Depends(auth.require_user)):
+    return auth.list_github_accounts(user)
+
+
+@router.get("/github/accounts/{account_id}/export")
+def export_github_token(account_id: int, user: dict = Depends(auth.require_user)):
+    return auth.export_github_token(account_id, user)
+
+
+@router.post("/github/accounts/{account_id}/link")
+def link_github_account_to_user(account_id: int, request: LinkGitHubAccountRequest, user: dict = Depends(auth.require_user)):
+    return auth.assign_github_account(account_id, request.user_id, user)
+
+
+@router.delete("/github/accounts/{account_id}")
+def unlink_github_account(account_id: int, user: dict = Depends(auth.require_user)):
+    auth.unlink_github_account(account_id, user)
+    return {"ok": True}
 
 
 @router.post("/logout")

@@ -39,6 +39,23 @@ class VMRunResult(BaseModel):
     ok: bool
     stdout: str = ""
     stderr: str = ""
+    receipt_code: str | None = None
+    receipt_hash: str | None = None
+    receipt_text: str | None = None
+
+
+class RunReceipt(BaseModel):
+    code: str
+    receipt_hash: str
+    status: str
+    authorized_by: str
+    authorized_user_id: int | None = None
+    object_id: str = ""
+    file_path: str = ""
+    receipt_text: str
+    stdout: str = ""
+    stderr: str = ""
+    created_at: float
 
 
 class PeerInfo(BaseModel):
@@ -80,3 +97,7 @@ class PrivilegeRequestCreate(BaseModel):
 
 class ResolvePrivilegeRequest(BaseModel):
     approve: bool
+
+
+class LinkGitHubAccountRequest(BaseModel):
+    user_id: int

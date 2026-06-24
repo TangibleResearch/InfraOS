@@ -54,10 +54,10 @@ The init command creates runtime folders, initializes SQLite if missing, and cre
 
 ```text
 username: admin
-password: admin
+password: generated in data/admin-password.txt unless INFRAOS_ADMIN_PASSWORD is set
 ```
 
-Change the default admin password before exposing the backend beyond localhost.
+For throwaway local demos only, set INFRAOS_ALLOW_DEFAULT_ADMIN=1 to keep admin/admin.
 
 ## Run
 

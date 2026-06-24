@@ -1,5 +1,6 @@
 import sqlite3
 import time
+from typing import Any
 from .config import DATA_DIR, DB_PATH
 
 
@@ -91,6 +92,55 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            create table if not exists run_receipts (
+                id integer primary key autoincrement,
+                code text not null unique,
+                receipt_hash text not null,
+                status text not null,
+                authorized_by text not null,
+                authorized_user_id integer,
+                object_id text default '',
+                file_path text default '',
+                receipt_text text not null,
+                stdout text default '',
+                stderr text default '',
+                created_at real not null,
+                foreign key(authorized_user_id) references users(id) on delete set null
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table if not exists github_accounts (
+                id integer primary key autoincrement,
+                user_id integer not null,
+                github_id integer not null unique,
+                login text not null,
+                name text default '',
+                email text default '',
+                avatar_url text default '',
+                access_token text not null,
+                scope text default '',
+                token_type text default '',
+                linked_at real not null,
+                updated_at real not null,
+                foreign key(user_id) references users(id) on delete cascade
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table if not exists github_oauth_states (
+                state text primary key,
+                user_id integer,
+                mode text not null,
+                created_at real not null,
+                foreign key(user_id) references users(id) on delete cascade
+            )
+            """
+        )
 
 
 def upsert_object(object_id: str, name: str, object_type: str, start_flag: bool, file_path: str) -> None:
@@ -122,6 +172,67 @@ def get_logs(limit: int = 200) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(row) for row in reversed(rows)]
+
+
+def insert_run_receipt(receipt: dict[str, Any]) -> dict:
+    with connect() as conn:
+        conn.execute(
+            """
+            insert into run_receipts(
+                code, receipt_hash, status, authorized_by, authorized_user_id,
+                object_id, file_path, receipt_text, stdout, stderr, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt["code"],
+                receipt["receipt_hash"],
+                receipt["status"],
+                receipt["authorized_by"],
+                receipt.get("authorized_user_id"),
+                receipt.get("object_id") or "",
+                receipt.get("file_path") or "",
+                receipt["receipt_text"],
+                receipt.get("stdout") or "",
+                receipt.get("stderr") or "",
+                receipt["created_at"],
+            ),
+        )
+    return receipt
+
+
+def list_run_receipts(limit: int = 200, query: str = "") -> list[dict]:
+    limit = max(1, min(limit, 500))
+    with connect() as conn:
+        if query:
+            needle = f"%{query}%"
+            rows = conn.execute(
+                """
+                select * from run_receipts
+                where code like ?
+                   or receipt_hash like ?
+                   or status like ?
+                   or authorized_by like ?
+                   or object_id like ?
+                   or file_path like ?
+                   or receipt_text like ?
+                order by id desc
+                limit ?
+                """,
+                (needle, needle, needle, needle, needle, needle, needle, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "select * from run_receipts order by id desc limit ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_run_receipt(code: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("select * from run_receipts where code = ?", (code,)).fetchone()
+    return dict(row) if row else None
 
 
 def connect() -> sqlite3.Connection:

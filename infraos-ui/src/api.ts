@@ -3,15 +3,18 @@ import type {
   AuthNotification,
   AuthUser,
   CompileResult,
+  GitHubAccount,
+  GitHubOAuthConfig,
   Health,
   LogEvent,
   LoginResult,
   PeerInfo,
   PrivilegeRequest,
+  RunReceipt,
   VMRunResult
 } from "./types";
 
-export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 const TOKEN_KEY = "infraos_auth_token";
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
@@ -60,6 +63,9 @@ export const runFile = (filePath: string, objectId?: string) =>
   });
 export const pointRun = (objectId: string) =>
   request<VMRunResult>(`/api/vm/pointrun/${encodeURIComponent(objectId)}`, { method: "POST" });
+export const getReceipts = (query = "") =>
+  request<RunReceipt[]>(`/api/receipts${query ? `?q=${encodeURIComponent(query)}` : ""}`);
+export const getReceipt = (code: string) => request<RunReceipt>(`/api/receipts/${encodeURIComponent(code)}`);
 
 export function compileSource(source: string, name = "workspace") {
   return request<CompileResult>("/api/compile", {
@@ -82,6 +88,18 @@ export const login = (username: string, password: string) =>
 export const logout = () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
 export const getMe = () => request<AuthUser>("/api/auth/me");
 export const getPrivileges = () => request<string[]>("/api/auth/privileges");
+export const getGitHubConfig = () => request<GitHubOAuthConfig>("/api/auth/github/config");
+export const beginGitHubLogin = () => request<{ auth_url: string; state: string }>("/api/auth/github/login", { method: "POST" });
+export const beginGitHubLink = () => request<{ auth_url: string; state: string }>("/api/auth/github/link", { method: "POST" });
+export const listGitHubAccounts = () => request<GitHubAccount[]>("/api/auth/github/accounts");
+export const exportGitHubToken = (accountId: number) => request<GitHubAccount>(`/api/auth/github/accounts/${accountId}/export`);
+export const linkGitHubAccountToUser = (accountId: number, userId: number) =>
+  request<GitHubAccount>(`/api/auth/github/accounts/${accountId}/link`, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId })
+  });
+export const unlinkGitHubAccount = (accountId: number) =>
+  request<{ ok: boolean }>(`/api/auth/github/accounts/${accountId}`, { method: "DELETE" });
 export const listUsers = () => request<AuthUser[]>("/api/auth/users");
 export const createUser = (payload: {
   username: string;

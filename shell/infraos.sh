@@ -162,15 +162,17 @@ start_backend_bg() {
   fi
   if port_busy "$BACKEND_PORT"; then
     echo "backend port $BACKEND_PORT is occupied by stale process(es): $(listener_pids "$BACKEND_PORT" | tr '\n' ' ')"
+    if [ "${INFRAOS_KILL_STALE:-0}" != "1" ]; then
+      echo "Set INFRAOS_KILL_STALE=1 to let this script stop unknown listeners."
+      return 1
+    fi
     stop_port "$BACKEND_PORT" "backend"
   fi
   ensure_runtime_state
   test -n "${OPENAI_API_KEY:-}" && echo "OPENAI_API_KEY will be passed to backend" || echo "OPENAI_API_KEY is not set in this shell"
   echo "starting backend -> $BACKEND_URL"
-  (
-    cd "$ROOT_DIR/infraos-backend"
-    exec .venv/bin/uvicorn main:app --host 127.0.0.1 --port "$BACKEND_PORT"
-  ) >"$LOG_DIR/backend.log" 2>&1 &
+  nohup sh -c 'cd "$1" && exec .venv/bin/uvicorn main:app --host 127.0.0.1 --port "$2"' sh \
+    "$ROOT_DIR/infraos-backend" "$BACKEND_PORT" >"$LOG_DIR/backend.log" 2>&1 </dev/null &
   echo "$!" > "$BACKEND_PID"
 }
 
@@ -185,14 +187,15 @@ start_ui_bg() {
   fi
   if port_busy "$UI_PORT"; then
     echo "ui port $UI_PORT is occupied by stale process(es): $(listener_pids "$UI_PORT" | tr '\n' ' ')"
+    if [ "${INFRAOS_KILL_STALE:-0}" != "1" ]; then
+      echo "Set INFRAOS_KILL_STALE=1 to let this script stop unknown listeners."
+      return 1
+    fi
     stop_port "$UI_PORT" "ui"
   fi
   echo "starting ui -> $UI_URL"
-  (
-    cd "$ROOT_DIR/infraos-ui"
-    npm install >/dev/null 2>&1
-    exec npm run dev -- --host 127.0.0.1
-  ) >"$LOG_DIR/ui.log" 2>&1 &
+  nohup sh -c 'cd "$1" && npm install >/dev/null 2>&1 && exec npm run preview -- --host 127.0.0.1 --port "$2"' sh \
+    "$ROOT_DIR/infraos-ui" "$UI_PORT" >"$LOG_DIR/ui.log" 2>&1 </dev/null &
   echo "$!" > "$UI_PID"
 }
 
@@ -250,8 +253,10 @@ case "$cmd" in
   stop)
     stop_pid "$UI_PID" "ui"
     stop_pid "$BACKEND_PID" "backend"
-    stop_port "$UI_PORT" "ui"
-    stop_port "$BACKEND_PORT" "backend"
+    if [ "${INFRAOS_KILL_STALE:-0}" = "1" ]; then
+      stop_port "$UI_PORT" "ui"
+      stop_port "$BACKEND_PORT" "backend"
+    fi
     ;;
   restart)
     "$0" stop
@@ -293,11 +298,22 @@ case "$cmd" in
     test -n "${AZURE_OPENAI_API_KEY:-}${MICROSOFT_API_KEY:-}" && echo "MICROSOFT/AZURE key: set" || echo "MICROSOFT/AZURE key: missing"
     test -n "${DEEPSEEK_API_KEY:-}" && echo "DEEPSEEK_API_KEY: set" || echo "DEEPSEEK_API_KEY: missing"
     test -n "${HUGGINGFACE_API_KEY:-}${HF_TOKEN:-}" && echo "HUGGINGFACE/HF key: set" || echo "HUGGINGFACE/HF key: missing"
+    test -n "${GITHUB_CLIENT_ID:-}" && echo "GITHUB_CLIENT_ID: set" || echo "GITHUB_CLIENT_ID: missing"
+    test -n "${GITHUB_CLIENT_SECRET:-}" && echo "GITHUB_CLIENT_SECRET: set" || echo "GITHUB_CLIENT_SECRET: missing"
     ;;
   init)
     ensure_runtime_state
     echo "SQLite DB: $ROOT_DIR/data/infraos.sqlite3"
-    echo "Default admin: admin / admin"
+    echo "Admin username: admin"
+    if [ -n "${INFRAOS_ADMIN_PASSWORD:-}" ]; then
+      echo "Admin password: configured from INFRAOS_ADMIN_PASSWORD"
+    elif [ "${INFRAOS_ALLOW_DEFAULT_ADMIN:-0}" = "1" ]; then
+      echo "Admin password: admin"
+    elif [ -f "$ROOT_DIR/data/admin-password.txt" ]; then
+      echo "Admin password file: $ROOT_DIR/data/admin-password.txt"
+    else
+      echo "Admin password: generated on first backend boot"
+    fi
     ;;
   build)
     build_all
@@ -320,7 +336,15 @@ case "$cmd" in
     ;;
   backend)
     ensure_runtime_state
-    stop_port "$BACKEND_PORT" "backend"
+    if port_busy "$BACKEND_PORT"; then
+      echo "backend port $BACKEND_PORT is occupied by pid(s): $(listener_pids "$BACKEND_PORT" | tr '\n' ' ')"
+      echo "Run shell/infraos.sh stop, choose another INFRAOS_BACKEND_PORT, or set INFRAOS_KILL_STALE=1."
+      if [ "${INFRAOS_KILL_STALE:-0}" = "1" ]; then
+        stop_port "$BACKEND_PORT" "backend"
+      else
+        exit 1
+      fi
+    fi
     test -n "${OPENAI_API_KEY:-}" && echo "OPENAI_API_KEY will be passed to backend" || echo "OPENAI_API_KEY is not set in this shell"
     cd "$ROOT_DIR/infraos-backend"
     .venv/bin/uvicorn main:app --reload --port "$BACKEND_PORT"
